@@ -17,6 +17,27 @@ type Indexer interface {
 	Delete(key []byte) bool
 }
 
+type IndexType = int8
+
+const (
+	// Btree 索引
+	Btree IndexType = iota + 1
+
+	// ART 自适应基数树
+	ART
+)
+
+func NewIndexer(typ IndexType) Indexer {
+	switch typ {
+	case Btree:
+		return NewBTree()
+	case ART:
+		return nil
+	default:
+		panic("invalid indexer")
+	}
+}
+
 // Item 在内存中表示一个键值对，主要是为了给btree使用，google的btree库必须这个条目
 type Item struct {
 	key []byte

@@ -2,6 +2,10 @@ package data
 
 import "bitcask-go/fio"
 
+const DataFileNameSuffix = ".data"
+
+// DataFile
+// @Description: 磁盘上的数据文件
 type DataFile struct {
 	FileId    uint32
 	WriteOff  int64
@@ -13,8 +17,8 @@ func OpenDataFile(dirPath string, fileId uint32) (*DataFile, error) {
 	return nil, nil
 }
 
-func (df *DataFile) ReadLogRecord(offset int64) (*LogRecord, error) {
-	return nil, nil
+func (df *DataFile) ReadLogRecord(offset int64) (*LogRecord, int64, error) {
+	return nil, 0, nil
 }
 
 // Write
