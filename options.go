@@ -59,13 +59,13 @@ const (
 )
 
 var DefaultOptions = Options{
-	DirPath:            os.TempDir(),
-	DataFileSize:       256 * 1024 * 1024, // 256MB
-	SyncWrites:         false,
-	BytesPerSync:       0,
-	IndexType:          Btree,
-	MMapAtStartup:      true,
-	DataFileMergeRatio: 0.5,
+	DirPath:      os.TempDir(),
+	DataFileSize: 256 * 1024 * 1024, // 256MB
+	SyncWrites:   false,
+	//BytesPerSync:       0,
+	IndexType: Btree,
+	//MMapAtStartup:      true,
+	//DataFileMergeRatio: 0.5,
 }
 
 var DefaultIteratorOptions = IteratorOptions{

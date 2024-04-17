@@ -92,7 +92,7 @@ func (db *DB) Delete(key []byte) error {
 	}
 
 	// 检查key是否存在，如果不存在直接返回
-	if pos := db.index.Get(key); pos != nil {
+	if pos := db.index.Get(key); pos == nil {
 		return nil
 	}
 
@@ -141,7 +141,7 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	if logRecord.Type != data.LogRecordDeleted {
+	if logRecord.Type == data.LogRecordDeleted {
 		return nil, ErrKeyNotFound
 	}
 	return logRecord.Value, nil
@@ -153,7 +153,7 @@ func (db *DB) appendLogRecord(logRecord *data.LogRecord) (*data.LogRecordPos, er
 	defer db.mu.Unlock()
 
 	//判断当前活跃数据文件是否存在，因为数据库在没有写入的时候是没有文件生成的  如果为空则初始化数据文件
-	if db.activeFile != nil {
+	if db.activeFile == nil {
 		if err := db.setActiveDataFile(); err != nil {
 			return nil, err
 		}
@@ -233,7 +233,7 @@ func (db *DB) loadDataFile() error {
 	}
 	//  对文件id进行排序，从小到大依次加载
 	sort.Ints(fileIds)
-
+	db.fileIds = fileIds
 	//  遍历每个文件id，打开对应的数据文件
 
 	for i, fid := range fileIds {
@@ -304,6 +304,7 @@ func (db *DB) loadIndexFromDataFiles() error {
 	}
 	return nil
 }
+
 func checkOptions(options Options) error {
 	if options.DirPath == "" {
 		return errors.New("DirPath is empty")

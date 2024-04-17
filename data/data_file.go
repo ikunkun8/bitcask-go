@@ -48,12 +48,13 @@ func (df *DataFile) ReadLogRecord(offset int64) (*LogRecord, int64, error) {
 	if offset+maxLogRecordHeaderSize > fileSize {
 		headerBytes = fileSize - offset
 	}
-	//读取Header信息
+	//读取Header信息，有可能多读了，keySize和valueSize并不一定用到最长的字节数
 	headerBuf, err := df.readNBytes(headerBytes, offset)
 	if err != nil {
 		return nil, 0, err
 	}
 
+	//所以要把多读出来的header处理一下，返回实际的header和长度
 	header, headerSize := decodeLogRecordHeader(headerBuf)
 	if header == nil {
 		return nil, 0, io.EOF
@@ -74,12 +75,12 @@ func (df *DataFile) ReadLogRecord(offset int64) (*LogRecord, int64, error) {
 		if err != nil {
 			return nil, 0, err
 		}
-		//解除key、value
+		//解出key、value
 		logRecord.Key = kvBuf[:keySize]
 		logRecord.Value = kvBuf[keySize:]
 	}
 
-	//校验数据的有效性
+	//校验数据的有效性，原理是拿磁盘上LogRecord中除了头部header crc字段之后求crc值，判断和直接从磁盘上取出来的crc值是否相同
 	crc := getLogRecordCRC(logRecord, headerBuf[crc32.Size:headerSize])
 	if crc != header.crc {
 		return nil, 0, ErrInvalidCRC
