@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,10 +16,12 @@ import (
 type DB struct {
 	options    Options
 	mu         *sync.RWMutex
-	fileIds    []int //只能用于加载索引时使用的文件id
-	activeFile *data.DataFile
-	olderFiles map[uint32]*data.DataFile
-	index      index.Indexer //内存索引
+	fileIds    []int                     //只能用于加载索引时使用的文件id
+	activeFile *data.DataFile            //活跃文件
+	olderFiles map[uint32]*data.DataFile //旧文件，只能读
+	index      index.Indexer             //内存索引
+	seqNo      uint64                    //事务序列号，全局递增
+	isMerging  bool                      //是否有文件在merge
 }
 
 // Open
@@ -47,10 +50,20 @@ func Open(options Options) (*DB, error) {
 		index:      index.NewIndexer(options.IndexType),
 	}
 
+	// 加载merge 数据目录
+	if err := db.loadMergeFiles(); err != nil {
+		return nil, err
+	}
 	// 加载数据文件
 	if err := db.loadDataFile(); err != nil {
 		return nil, err
 	}
+
+	// 从hint索引文件加载索引
+	if err := db.loadIndexFromHintFile(); err != nil {
+		return nil, err
+	}
+
 	//  从数据文件中加载索引
 	if err := db.loadIndexFromDataFiles(); err != nil {
 		return nil, err
@@ -98,13 +111,13 @@ func (db *DB) Put(key []byte, value []byte) error {
 
 	// 构造LogRecord结构体
 	logRecord := &data.LogRecord{
-		Key:   key,
+		Key:   logRecordKeyWithSeq(key, nonTransactionSeqNo),
 		Value: value,
 		Type:  data.LogRecordNormal,
 	}
 
 	// 追加写入数据到当前活跃数据文件当中
-	pos, err := db.appendLogRecord(logRecord)
+	pos, err := db.appendLogRecordWithLock(logRecord)
 	if err != nil {
 		return err
 	}
@@ -128,9 +141,12 @@ func (db *DB) Delete(key []byte) error {
 	}
 
 	//	构造 LogRecord，标识是被删除的key
-	logRecord := &data.LogRecord{Key: key, Type: data.LogRecordDeleted}
+	logRecord := &data.LogRecord{
+		Key:  logRecordKeyWithSeq(key, nonTransactionSeqNo),
+		Type: data.LogRecordDeleted,
+	}
 	// 写入到数据文件中
-	_, err := db.appendLogRecord(logRecord)
+	_, err := db.appendLogRecordWithLock(logRecord)
 	if err != nil {
 		return err
 	}
@@ -211,11 +227,14 @@ func (db *DB) getValueByPosition(logRecordPos *data.LogRecordPos) ([]byte, error
 	return logRecord.Value, nil
 }
 
-// 追加写到活跃文件中
-func (db *DB) appendLogRecord(logRecord *data.LogRecord) (*data.LogRecordPos, error) {
-
+func (db *DB) appendLogRecordWithLock(logRecord *data.LogRecord) (*data.LogRecordPos, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	return db.appendLogRecord(logRecord)
+}
+
+// 追加写到活跃文件中
+func (db *DB) appendLogRecord(logRecord *data.LogRecord) (*data.LogRecordPos, error) {
 
 	//判断当前活跃数据文件是否存在，因为数据库在没有写入的时候是没有文件生成的  如果为空则初始化数据文件
 	if db.activeFile == nil {
@@ -328,9 +347,40 @@ func (db *DB) loadIndexFromDataFiles() error {
 		return nil
 	}
 
+	//查看是否发生过merge
+	hasMerge, nonMergeFileID := false, uint32(0)
+	mergeFinFileName := filepath.Join(db.options.DirPath, data.MergeFinishedFileName)
+	if _, err := os.Stat(mergeFinFileName); err == nil {
+		fid, err := db.getNonMergeFileID(db.options.DirPath)
+		if err != nil {
+			return err
+		}
+		hasMerge = true
+		nonMergeFileID = fid
+	}
+
+	updateIndex := func(key []byte, typ data.LogRecordType, pos *data.LogRecordPos) {
+		var ok bool
+		if typ == data.LogRecordDeleted {
+			ok = db.index.Delete(key)
+		} else {
+			ok = db.index.Put(key, pos)
+		}
+		if !ok {
+			panic("failed to update index")
+		}
+	}
+
+	//暂存事务数据
+	transactionRecords := make(map[uint64][]*data.TransactionRecord)
+	var currentSeqNo uint64 = nonTransactionSeqNo
 	//遍历所有文件id，处理文件中的记录
 	for i, fid := range db.fileIds {
 		var fileId = uint32(fid)
+		//如果比最近未参与merge的文件id更小，则说明已经从hint中加载过了
+		if hasMerge && fileId < nonMergeFileID {
+			continue
+		}
 		var dataFile *data.DataFile
 		if fileId == db.activeFile.FileId {
 			dataFile = db.activeFile
@@ -352,12 +402,31 @@ func (db *DB) loadIndexFromDataFiles() error {
 
 			//构造内存索引
 			logRecordPos := &data.LogRecordPos{Fid: fileId, Offset: offset}
-			if logRecord.Type == data.LogRecordDeleted {
-				db.index.Delete(logRecord.Key)
+
+			//解析 Key，拿到事务序列号
+			realKey, seqNo := parseLogRecordKey(logRecord.Key)
+			if seqNo == nonTransactionSeqNo {
+				updateIndex(realKey, logRecord.Type, logRecordPos)
 			} else {
-				db.index.Put(logRecord.Key, logRecordPos)
+				//事务完成，对应得seq no数据更新到内存索引当中
+				if logRecord.Type == data.LogRecordTxnFinished {
+					for _, txnRecord := range transactionRecords[seqNo] {
+						updateIndex(txnRecord.Record.Key, txnRecord.Record.Type, txnRecord.Pos)
+					}
+					delete(transactionRecords, seqNo)
+				} else {
+					logRecord.Key = realKey
+					transactionRecords[seqNo] = append(transactionRecords[seqNo], &data.TransactionRecord{
+						Record: logRecord,
+						Pos:    logRecordPos,
+					})
+				}
 			}
 
+			//更新事务序列号
+			if seqNo > currentSeqNo {
+				currentSeqNo = seqNo
+			}
 			//递增offset,下一次从新的位置读取
 			offset += size
 		}
@@ -367,6 +436,8 @@ func (db *DB) loadIndexFromDataFiles() error {
 			db.activeFile.WriteOff = offset
 		}
 	}
+	//更新事务序列号
+	db.seqNo = currentSeqNo
 	return nil
 }
 

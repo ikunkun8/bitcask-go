@@ -13,7 +13,11 @@ var (
 	ErrInvalidCRC = errors.New("invalid CRC value")
 )
 
-const DataFileNameSuffix = ".data"
+const (
+	DataFileNameSuffix    = ".data"
+	HintFileName          = "hint-index"
+	MergeFinishedFileName = "merge-finished"
+)
 
 // DataFile
 // @Description: 磁盘上的数据文件
@@ -25,7 +29,25 @@ type DataFile struct {
 
 // OpenDataFile 打开新的数据文件
 func OpenDataFile(dirPath string, fileId uint32) (*DataFile, error) {
-	fileName := filepath.Join(dirPath, fmt.Sprintf("%09d", fileId)+DataFileNameSuffix)
+	fileName := GetDataFileName(dirPath, fileId)
+	return newDataFile(fileName, fileId)
+}
+
+func OpenHintFile(dirpath string) (*DataFile, error) {
+	fileName := filepath.Join(dirpath, HintFileName)
+	return newDataFile(fileName, 0)
+}
+
+func OpenMergeFinishedFile(dirpath string) (*DataFile, error) {
+	fileName := filepath.Join(dirpath, MergeFinishedFileName)
+	return newDataFile(fileName, 0)
+}
+
+func GetDataFileName(dirPath string, fileId uint32) string {
+	return filepath.Join(dirPath, fmt.Sprintf("%09d", fileId)+DataFileNameSuffix)
+}
+
+func newDataFile(fileName string, fileId uint32) (*DataFile, error) {
 	ioManager, err := fio.NewIOManager(fileName)
 	if err != nil {
 		return nil, err
@@ -36,7 +58,6 @@ func OpenDataFile(dirPath string, fileId uint32) (*DataFile, error) {
 		IoManager: ioManager,
 	}, nil
 }
-
 func (df *DataFile) ReadLogRecord(offset int64) (*LogRecord, int64, error) {
 
 	fileSize, err := df.IoManager.Size()
@@ -101,6 +122,16 @@ func (df *DataFile) Write(buf []byte) error {
 	}
 	df.WriteOff += int64(n)
 	return nil
+}
+
+// 写入索引信息到hintfile
+func (df *DataFile) WriteHintRecord(key []byte, pos *LogRecordPos) error {
+	record := &LogRecord{
+		Key:   key,
+		Value: EncodeLogRecordPos(pos),
+	}
+	encRecord, _ := EncodeLogRecord(record)
+	return df.Write(encRecord)
 }
 
 func (df *DataFile) Sync() error {
