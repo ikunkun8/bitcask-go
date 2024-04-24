@@ -160,11 +160,16 @@ func (db *DB) loadMergeFiles() error {
 	if err != nil {
 		return err
 	}
+
+	// 查找标识merge完成的文件，判断merge是否处理完了
 	var mergeFinisher bool
 	var mergeFileNames []string
 	for _, entry := range dirEntries {
 		if entry.Name() == data.MergeFinishedFileName {
 			mergeFinisher = true
+		}
+		if entry.Name() == data.SeqNoFileName {
+			continue
 		}
 		mergeFileNames = append(mergeFileNames, entry.Name())
 	}

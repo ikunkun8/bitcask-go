@@ -14,15 +14,19 @@ import (
 )
 
 type DB struct {
-	options    Options
-	mu         *sync.RWMutex
-	fileIds    []int                     //只能用于加载索引时使用的文件id
-	activeFile *data.DataFile            //活跃文件
-	olderFiles map[uint32]*data.DataFile //旧文件，只能读
-	index      index.Indexer             //内存索引
-	seqNo      uint64                    //事务序列号，全局递增
-	isMerging  bool                      //是否有文件在merge
+	options         Options
+	mu              *sync.RWMutex
+	fileIds         []int                     //只能用于加载索引时使用的文件id
+	activeFile      *data.DataFile            //活跃文件
+	olderFiles      map[uint32]*data.DataFile //旧文件，只能读
+	index           index.Indexer             //内存索引
+	seqNo           uint64                    //事务序列号，全局递增
+	isMerging       bool                      //是否有文件在merge
+	seqNoFileExists bool                      //是否已经存在seqnofile
+	isInitial       bool                      //是否是第一次初始化此目录
 }
+
+const seqNoKey = "seq.no"
 
 // Open
 //
@@ -35,6 +39,7 @@ func Open(options Options) (*DB, error) {
 	if err := checkOptions(options); err != nil {
 		return nil, err
 	}
+	var isInitial bool
 	//判断数据目录是否存在，不存在则创建目录
 	if _, err := os.Stat(options.DirPath); os.IsNotExist(err) {
 		if err = os.Mkdir(options.DirPath, os.ModePerm); err != nil {
@@ -42,12 +47,20 @@ func Open(options Options) (*DB, error) {
 		}
 	}
 
+	entries, err := os.ReadDir(options.DirPath)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		isInitial = true
+	}
 	//初始化Db实例结构体
 	db := &DB{
 		options:    options,
 		mu:         new(sync.RWMutex),
 		olderFiles: make(map[uint32]*data.DataFile),
-		index:      index.NewIndexer(options.IndexType),
+		index:      index.NewIndexer(options.IndexType, options.DirPath, options.SyncWrites),
+		isInitial:  isInitial,
 	}
 
 	// 加载merge 数据目录
@@ -59,15 +72,30 @@ func Open(options Options) (*DB, error) {
 		return nil, err
 	}
 
-	// 从hint索引文件加载索引
-	if err := db.loadIndexFromHintFile(); err != nil {
-		return nil, err
+	if options.IndexType != BPlusTree {
+		// 从hint索引文件加载索引
+		if err := db.loadIndexFromHintFile(); err != nil {
+			return nil, err
+		}
+
+		//  从数据文件中加载索引
+		if err := db.loadIndexFromDataFiles(); err != nil {
+			return nil, err
+		}
+	} else {
+		//取出当前事务序列号
+		if err := db.loadSeqNO(); err != nil {
+			return nil, err
+		}
+		if db.activeFile != nil {
+			size, err := db.activeFile.IoManager.Size()
+			if err != nil {
+				return nil, err
+			}
+			db.activeFile.WriteOff = size
+		}
 	}
 
-	//  从数据文件中加载索引
-	if err := db.loadIndexFromDataFiles(); err != nil {
-		return nil, err
-	}
 	return db, nil
 }
 
@@ -79,6 +107,26 @@ func (db *DB) Close() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	//关闭索引
+	if err := db.index.Close(); err != nil {
+		return err
+	}
+	//保存当前事务序列号
+	seqNoFile, err := data.OpenSeqNoFile(db.options.DirPath)
+	if err != nil {
+		return err
+	}
+	record := &data.LogRecord{
+		Key:   []byte(seqNoKey),
+		Value: []byte(strconv.FormatUint(db.seqNo, 10)),
+	}
+	encRecord, _ := data.EncodeLogRecord(record)
+
+	if err := seqNoFile.Write(encRecord); err != nil {
+		return err
+	}
+	if err := seqNoFile.Sync(); err != nil {
+	}
 	//关闭当前活跃文件
 	if err := db.activeFile.Close(); err != nil {
 		return err
@@ -192,6 +240,7 @@ func (db *DB) Fold(fn func(k []byte, v []byte) bool) error {
 	defer db.mu.RUnlock()
 
 	iterator := db.index.Iterator(false)
+	defer iterator.Close()
 	for iterator.Rewind(); iterator.Valid(); iterator.Next() {
 		value, err := db.getValueByPosition(iterator.Value())
 		if err != nil {
@@ -448,5 +497,25 @@ func checkOptions(options Options) error {
 	if options.DataFileSize <= 0 {
 		return errors.New("DataFileSize must be greater than 0")
 	}
+	return nil
+}
+
+func (db *DB) loadSeqNO() error {
+	fileName := filepath.Join(db.options.DirPath, data.SeqNoFileName)
+	if _, err := os.Stat(fileName); os.IsNotExist(err) {
+		return nil
+	}
+	seqNoFile, err := data.OpenSeqNoFile(db.options.DirPath)
+	if err != nil {
+		return err
+	}
+	record, _, err := seqNoFile.ReadLogRecord(0)
+	seqNo, err := strconv.ParseUint(string(record.Value), 10, 64)
+	if err != nil {
+		return err
+	}
+	db.seqNo = seqNo
+	db.seqNoFileExists = true
+
 	return nil
 }

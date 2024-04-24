@@ -68,7 +68,6 @@ func TestIterator_Multi_Values(t *testing.T) {
 
 	// 正向迭代
 	iter1 := db.NewIterator(DefaultIteratorOptions)
-	defer iter1.Close()
 	for iter1.Rewind(); iter1.Valid(); iter1.Next() {
 		val, err := iter1.Value()
 		assert.Nil(t, err)
@@ -80,12 +79,13 @@ func TestIterator_Multi_Values(t *testing.T) {
 		assert.NotNil(t, iter1.Key())
 		t.Log("key = ", string(iter1.Key()))
 	}
+	iter1.Close()
 
 	// 反向迭代
 	iterOpts1 := DefaultIteratorOptions
 	iterOpts1.Reverse = true
 	iter2 := db.NewIterator(iterOpts1)
-	defer iter2.Close()
+
 	for iter2.Rewind(); iter2.Valid(); iter2.Next() {
 		val, err := iter2.Value()
 		assert.Nil(t, err)
@@ -97,14 +97,15 @@ func TestIterator_Multi_Values(t *testing.T) {
 		assert.NotNil(t, iter2.Key())
 		t.Log("key = ", string(iter2.Key()))
 	}
+	iter2.Close()
 
 	// 指定了 prefix = "Alt" 只会打印 Alter
 	iterOpts2 := DefaultIteratorOptions
 	iterOpts2.Prefix = []byte("B")
 	iter3 := db.NewIterator(iterOpts2)
-	defer iter3.Close()
 	for iter3.Rewind(); iter3.Valid(); iter3.Next() {
 		assert.NotNil(t, iter3.Key())
 		t.Log("key = ", string(iter3.Key()))
 	}
+	iter3.Close()
 }
